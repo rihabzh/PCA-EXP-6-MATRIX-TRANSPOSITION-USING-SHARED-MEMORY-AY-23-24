@@ -1,9 +1,9 @@
 # PCA-EXP-6-MATRIX-TRANSPOSITION-USING-SHARED-MEMORY-AY-23-24
-<h3>AIM:</h3>
-<h3>ENTER YOUR NAME</h3>
-<h3>ENTER YOUR REGISTER NO</h3>
-<h3>EX. NO</h3>
-<h3>DATE</h3>
+<h3>AIM:To perform Matrix Multiplication using Transposition using shared memory.</h3>
+<h3>RIHAB ZAKKAIR HUSSAIN</h3>
+<h3>212225230226</h3>
+<h3>EX. NO :- 6</h3>
+<h3>31-8-2026</h3>
 <h1> <align=center> MATRIX TRANSPOSITION USING SHARED MEMORY </h3>
   Implement Matrix transposition using GPU Shared memory.</h3>
 
@@ -61,10 +61,213 @@ Google Colab with NVCC Compiler
 16. End of Algorithm
 
 ## PROGRAM:
-TYPE YOUR CODE HERE
+```
+%%writefile shared_memory_transpose_clean.cu
+#include <stdio.h>
+#include <cuda_runtime.h>
+#include <sys/time.h>
 
+#pragma diag_suppress 177
+#pragma diag_suppress 20012
+
+#define CHECK(call)                                                     \
+{                                                                       \
+    const cudaError_t error = call;                                     \
+    if (error != cudaSuccess)                                           \
+    {                                                                   \
+        printf("Error: %s:%d, code:%d, reason:%s\n",                    \
+            __FILE__, __LINE__, error, cudaGetErrorString(error));      \
+        exit(1);                                                        \
+    }                                                                   \
+}
+
+#define BDIMX 16
+#define BDIMY 16
+#define IPAD  2
+
+void printData(const char *msg, int *in, int size)
+{
+    printf("%s: ", msg);
+    for (int i = 0; i < size; i++)
+        printf("%4d", in[i]);
+    printf("\n\n");
+}
+
+// ----------------------------------------------------------
+//  KERNELS
+// ----------------------------------------------------------
+
+__global__ void setRowReadRow(int *out)
+{
+    __shared__ int tile[BDIMY][BDIMX];
+    unsigned int idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    tile[threadIdx.y][threadIdx.x] = idx;
+    __syncthreads();
+    out[idx] = tile[threadIdx.y][threadIdx.x];
+}
+
+__global__ void setColReadCol(int *out)
+{
+    __shared__ int tile[BDIMX][BDIMY];
+    unsigned int idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    tile[threadIdx.x][threadIdx.y] = idx;
+    __syncthreads();
+    out[idx] = tile[threadIdx.x][threadIdx.y];
+}
+
+__global__ void setColReadCol2(int *out)
+{
+    __shared__ int tile[BDIMY][BDIMX];
+    unsigned int idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    unsigned int irow = idx / blockDim.y;
+    unsigned int icol = idx % blockDim.y;
+
+    tile[icol][irow] = idx;
+    __syncthreads();
+    out[idx] = tile[icol][irow];
+}
+
+__global__ void setRowReadCol(int *out)
+{
+    __shared__ int tile[BDIMY][BDIMX];
+    unsigned int idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    unsigned int irow = idx / blockDim.y;
+    unsigned int icol = idx % blockDim.y;
+
+    tile[threadIdx.y][threadIdx.x] = idx;
+    __syncthreads();
+    out[idx] = tile[icol][irow];
+}
+
+__global__ void setRowReadColPad(int *out)
+{
+    __shared__ int tile[BDIMY][BDIMX + IPAD];
+    unsigned int idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    unsigned int irow = idx / blockDim.y;
+    unsigned int icol = idx % blockDim.y;
+
+    tile[threadIdx.y][threadIdx.x] = idx;
+    __syncthreads();
+    out[idx] = tile[icol][irow];
+}
+
+__global__ void setRowReadColDyn(int *out)
+{
+    extern __shared__ int tile[];
+    unsigned int idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    unsigned int irow = idx / blockDim.y;
+    unsigned int icol = idx % blockDim.y;
+
+    unsigned int col_idx = icol * blockDim.x + irow;
+
+    tile[idx] = idx;
+    __syncthreads();
+    out[idx] = tile[col_idx];
+}
+
+__global__ void setRowReadColDynPad(int *out)
+{
+    extern __shared__ int tile[];
+    unsigned int g_idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    unsigned int irow = g_idx / blockDim.y;
+    unsigned int icol = g_idx % blockDim.y;
+
+    unsigned int row_idx = threadIdx.y * (blockDim.x + IPAD) + threadIdx.x;
+    unsigned int col_idx = icol * (blockDim.x + IPAD) + irow;
+
+    tile[row_idx] = g_idx;
+    __syncthreads();
+    out[g_idx] = tile[col_idx];
+}
+
+// ----------------------------------------------------------
+// MAIN
+// ----------------------------------------------------------
+
+int main(int argc, char **argv)
+{
+    int dev = 0;
+    cudaDeviceProp prop;
+    CHECK(cudaGetDeviceProperties(&prop, dev));
+    CHECK(cudaSetDevice(dev));
+
+    printf("Running on device: %s\n", prop.name);
+
+    int nx = BDIMX, ny = BDIMY;
+    int size = nx * ny;
+    size_t nBytes = size * sizeof(int);
+
+    bool printFlag = true;
+    if (argc > 1) printFlag = atoi(argv[1]);
+
+    dim3 block(BDIMX, BDIMY);
+    dim3 grid(1, 1);
+
+    printf("<<< grid (%d,%d), block (%d,%d) >>>\n\n",
+           grid.x, grid.y, block.x, block.y);
+
+    int *d_C, *gpuRef;
+    CHECK(cudaMalloc((void**)&d_C, nBytes));
+    gpuRef = (int*)malloc(nBytes);
+
+    // Run each kernel
+    CHECK(cudaMemset(d_C, 0, nBytes));
+    setRowReadRow<<<grid, block>>>(d_C);
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    if (printFlag) printData("setRowReadRow", gpuRef, size);
+
+    CHECK(cudaMemset(d_C, 0, nBytes));
+    setColReadCol<<<grid, block>>>(d_C);
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    if (printFlag) printData("setColReadCol", gpuRef, size);
+
+    CHECK(cudaMemset(d_C, 0, nBytes));
+    setColReadCol2<<<grid, block>>>(d_C);
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    if (printFlag) printData("setColReadCol2", gpuRef, size);
+
+    CHECK(cudaMemset(d_C, 0, nBytes));
+    setRowReadCol<<<grid, block>>>(d_C);
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    if (printFlag) printData("setRowReadCol", gpuRef, size);
+
+    CHECK(cudaMemset(d_C, 0, nBytes));
+    setRowReadColDyn<<<grid, block, BDIMX * BDIMY * sizeof(int)>>>(d_C);
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    if (printFlag) printData("setRowReadColDyn", gpuRef, size);
+
+    CHECK(cudaMemset(d_C, 0, nBytes));
+    setRowReadColPad<<<grid, block>>>(d_C);
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    if (printFlag) printData("setRowReadColPad", gpuRef, size);
+
+    CHECK(cudaMemset(d_C, 0, nBytes));
+    setRowReadColDynPad<<<grid, block,
+                         (BDIMX + IPAD) * BDIMY * sizeof(int)>>>(d_C);
+    CHECK(cudaMemcpy(gpuRef, d_C, nBytes, cudaMemcpyDeviceToHost));
+    if (printFlag) printData("setRowReadColDynPad", gpuRef, size);
+
+    free(gpuRef);
+    CHECK(cudaFree(d_C));
+    CHECK(cudaDeviceReset());
+
+    return 0;
+}
+
+
+!nvcc -arch=sm_75 shared_memory_transpose_clean.cu -o shared_mem
+!./shared_mem
+```
 ## OUTPUT:
-SHOW YOUR OUTPUT HERE
+<img width="1465" height="351" alt="image" src="https://github.com/user-attachments/assets/57d65a11-5c98-41b3-8cba-32483068e8bb" />
+
 
 ## RESULT:
 Thus the program has been executed by using CUDA to transpose a matrix. It is observed that there are variations shared memory and global memory implementation. The elapsed times are recorded as _______________.
